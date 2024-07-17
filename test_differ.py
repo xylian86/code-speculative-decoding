@@ -20,9 +20,6 @@ plt.show()
 """
 
 generated_text = """
-
-
-```python
 import numpy as np
 import matplotlib.pyplot as plt
 
@@ -36,7 +33,9 @@ plt.title('Histogram of Throughput Values')
 plt.xlabel('Tokens per Second')
 plt.ylabel('Frequency')
 plt.axvline(average_throughput, color='red', linestyle='dashed', linewidth=1)
-plt.text(
+plt.text(average_throughput*0.9, max(plt.ylim())*0.9, f'Average: {average_throughput:.2f}', color = 'red')
+plt.xlim(0, max(tokens_per_sec_arr))
+plt.show()
 """
 
 model_name = "deepseek-ai/deepseek-coder-6.7b-base"
