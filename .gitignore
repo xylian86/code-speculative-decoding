@@ -1,0 +1,4 @@
+*.json
+__pycache__/
+*.jsonl*
+.ipynb_checkpoints/
