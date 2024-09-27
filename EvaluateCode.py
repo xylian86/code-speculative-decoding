@@ -7,10 +7,7 @@
 import torch
 import torch.nn.functional as F
 from transformers import AutoTokenizer, AutoModelForCausalLM
-import transformers # requires transformers==4.35.2
-draft_device = torch.device('cuda:2')
-model_device = torch.device('cuda:3')
-
+import transformers
 
 # In[5]:
 
@@ -25,7 +22,7 @@ draft_model_name = "deepseek-ai/deepseek-coder-1.3b-instruct"
 # draft_model_name ="codellama/CodeLlama-7b-hf"
 # draft_model_name = "bigcode/starcoderbase-1b"
 # draft_model_name = "deepseek-ai/deepseek-coder-1.3b-base"
-draft_model = AutoModelForCausalLM.from_pretrained(draft_model_name, trust_remote_code=True, torch_dtype=torch.float16, use_flash_attention_2=True).to(draft_device)#, load_in_4bit=True)
+draft_model = AutoModelForCausalLM.from_pretrained(draft_model_name, trust_remote_code=True, torch_dtype=torch.float16, use_flash_attention_2=True, device_map="auto")#, load_in_4bit=True)
 # print(draft_model.device)
 
 
@@ -37,7 +34,7 @@ model_name = "deepseek-ai/deepseek-coder-33b-instruct"
 # model_name = "bigcode/starcoderbase"
 # model_name = "deepseek-ai/deepseek-coder-33b-base"
 tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
-model = AutoModelForCausalLM.from_pretrained(model_name, trust_remote_code=True, torch_dtype=torch.float16,  use_flash_attention_2=True, device_map="auto")#.to(model_device)#, load_in_4bit=True)#  , use_flash_attention=True)
+model = AutoModelForCausalLM.from_pretrained(model_name, trust_remote_code=True, torch_dtype=torch.float16,  use_flash_attention_2=True, device_map="auto")#, load_in_4bit=True)#  , use_flash_attention=True)
 
 
 # In[ ]:
@@ -102,50 +99,6 @@ def find_candidate_pred_tokens(input_ids, max_ngram_size=3, num_pred_tokens=10):
     # If no match is found, return an empty tensor
     return torch.tensor([100], dtype=torch.long, device=input_ids.device)
 
-@torch.no_grad()
-def find_candidate_pred_tokens_diff(input_ids, code_ids, orig_input_len=0, ngram_size=3, num_pred_tokens=10):
-    # print(input_ids, code_ids)
-    
-    # start_time = time.perf_counter()
-    input_length = input_ids.size(1)
-    code_length = len(code_ids)
-
-    # Ensure max_ngram_size and num_pred_tokens are valid
-    if ngram_size <= 0 or ngram_size > input_length:
-        raise ValueError("Invalid max_ngram_size or num_pred_tokens")
-
-    sm = difflib.SequenceMatcher(None, code_ids, input_ids[0, orig_input_len:].tolist())
-    
-    deleted = added = changed = same = last_deleted = 0
-    for tag, i1, i2, j1, j2 in sm.get_opcodes():
-        if tag == 'replace':
-            changed += i2 - i1
-        elif tag == 'delete':
-            deleted += i2 - i1
-            last_deleted = i2 - i1
-        elif tag == 'insert':
-            added += j2 - j1
-        elif tag == 'equal':
-            same += i2 - i1
-    
-    approx_tokens_original = changed + deleted + same - last_deleted
-
-    lookback_start = max(input_length - ngram_size, orig_input_len)
-    search_ngram = input_ids[0, lookback_start:].tolist()
-
-    for ngram_start in range(max(0, approx_tokens_original - ngram_size), len(code_ids)):
-        # if there is a match, return the entire rest of the tokens.
-        if ngram_start + len(search_ngram) >= len(code_ids):
-            break
-        if search_ngram == code_ids[ngram_start:ngram_start + len(search_ngram)]:
-            return torch.tensor(code_ids[ngram_start + len(search_ngram):max(ngram_start + len(search_ngram) + num_pred_tokens, len(code_ids))], dtype=torch.long, device=input_ids.device)
-
-    # If no match is found, return what the answer would be otherwise
-    # print("Diff searching took: ", time.perf_counter() - start_time)
-    return find_candidate_pred_tokens(input_ids, ngram_size, num_pred_tokens)
-    # return torch.tensor([], dtype=torch.long, device=input_ids.device)
-
-
 # In[ ]:
 
 
@@ -166,10 +119,11 @@ class DiffPromptLookupCandidateGenerator(CandidateGenerator):
     
     def get_candidates(self, input_ids: torch.LongTensor) -> Tuple[torch.LongTensor, Optional[torch.FloatTensor]]:
         # print("Getting candidates")
+
         if self.use_diff:
-            new_tokens = find_candidate_pred_tokens_diff(input_ids, self.code_ids, self.orig_input_len, self.ngram_size, self.num_pred_tokens).unsqueeze(0)
+            raise Exception("Diff not implemented")
         else:
-            new_tokens = find_candidate_pred_tokens(input_ids, self.ngram_size, self.num_pred_tokens).unsqueeze(0)
+            new_tokens = find_candidate_pred_tokens(input_ids, self.ngram_size, self.num_pred_tokens).unsqueeze(0).to(input_ids.device)
         self.last_predicted = new_tokens.shape[-1]
         
         return torch.cat(
@@ -198,42 +152,6 @@ class NumRunsStoppingCriteria(StoppingCriteria):
     def __call__(self, input_ids: torch.LongTensor, scores: torch.FloatTensor, **kwargs) -> torch.BoolTensor:
         self.num_runs += 1
         return self.num_runs >= self.max_num_runs
-
-
-class CodeContentStoppingCriteria(StoppingCriteria):
-    def __init__(self, tokenizer, prompt_tokens: int, newline_count=5):
-        self.newline_token = tokenizer.encode("""
-""")[-1]
-        self.code_block_token = tokenizer.encode("```")[-1]
-        # print("CODE CONTENT TOKEN: ", self.code_block_token)
-        
-        self.newline_count = newline_count
-        self.prompt_tokens = prompt_tokens
-        
-
-    def __call__(self, input_ids: torch.LongTensor, scores: torch.FloatTensor, **kwargs) -> torch.BoolTensor:
-        considered_tokens = input_ids[:, self.prompt_tokens:][0]
-        return (self.code_block_token == considered_tokens).any().item()
-        # considered_tokens = tokenizer.batch_decode(input_ids[:, self.prompt_tokens:])[0]
-        # newline_list = "\n"*self.newline_count
-        # print(newline_list, considered_tokens)
-        # return newline_list in considered_tokens
-
-class ScoreStoppingCriteria:
-    def __init__(self, min_score):
-        self.min_score = min_score
-
-    def __call__(self, input_ids: torch.LongTensor, scores: torch.FloatTensor, **kwargs) -> torch.BoolTensor:
-        if not(scores):
-            # print("No scores")
-            return False
-        else:
-            ...
-            # print("Got scores scores stopping: ", scores[0].shape, len(scores))
-        scores_tensor = torch.stack(scores, dim=0)
-        softmax_scores = F.softmax(scores_tensor, 2)
-        # print(softmax_scores)
-        return (softmax_scores.max(dim=2).values < self.min_score).any().item()
 
 def _get_default_candidate_generator_generator(generator: CandidateGenerator):
     def _get_candidate_generator(self, **kwargs):
@@ -270,17 +188,14 @@ class CodeTwoLayerLookupCandidateGenerator(CandidateGenerator):
             self.past_key_values = _crop_past_key_values(self.draft_model, self.past_key_values, input_ids.shape[-1] - 1)
 
         stopping_criteria = [NumRunsStoppingCriteria(self.num_runs), 
-                            CodeContentStoppingCriteria(self.tokenizer, self.prompt_tokens), 
                             ]
         if self.use_score_check:
-            stopping_criteria = [NumRunsStoppingCriteria(self.num_runs), 
-                                 CodeContentStoppingCriteria(self.tokenizer, self.prompt_tokens), 
-                                 ScoreStoppingCriteria(self.min_score)
-                                ]
+            raise Exception("Score check not implemented")
 
         # if self.past_key_values:
         #     print(self.past_key_values[0][0].shape)
 
+        old_device = input_ids.device
         input_ids = input_ids.to(self.draft_model.device)
 
         if self.past_key_values: 
@@ -309,7 +224,7 @@ class CodeTwoLayerLookupCandidateGenerator(CandidateGenerator):
                 return_dict_in_generate=True
             )
 
-        input_ids = input_ids.to(model_device)
+        input_ids = input_ids.to(old_device)
         # print("Scores: ", generation.scores)
 
         self.pred_tokens_count = generation.sequences.shape[-1] - input_ids.shape[-1]
@@ -319,17 +234,6 @@ class CodeTwoLayerLookupCandidateGenerator(CandidateGenerator):
         return generation.sequences, torch.stack(generation.scores, dim=1)
 
     def update_candidate_strategy(self, input_ids: torch.LongTensor, scores: torch.FloatTensor, num_matches: int):
-        if num_matches == self.pred_tokens_count:
-            if self.scores_count == 0:
-                self.min_score = 0
-            else:
-                self.min_score = (self.scores_count / self.scores_count + 1) * (self.min_score)
-        else:
-            if self.scores_count == 0:
-                self.min_score = self.past_top_scores[-num_matches]
-            else:
-                self.min_score = (self.scores_count / (self.scores_count + 1)) * (self.min_score) + (1 / (self.scores_count + 1)) * (self.past_top_scores[-1])
-        self.scores_count += 1
         pass 
 
 
@@ -338,7 +242,8 @@ class CodeTwoLayerLookupCandidateGenerator(CandidateGenerator):
 
 def print_update(dictionary):
     for key in dictionary:
-        print("\t", key, ": ", str(dictionary[key][-1])[:min(50, len(str(dictionary[key][-1])))])
+        if len(dictionary[key]) > 0:
+            print("\t", key, ": ", str(dictionary[key][-1])[:min(50, len(str(dictionary[key][-1])))])
     print("======")
 
 
@@ -367,17 +272,18 @@ from tqdm import tqdm
 from transformers import TextStreamer
 from rapidfuzz.distance import Levenshtein
 import difflib
+from torch.profiler import profile, record_function, ProfilerActivity
 
 # lookup_tokens = [10, 20, 40, 60, 80, 100, 120]
 # lookup_tokens = [40]
 # lookup_tokens = [40, 80, 120]
-lookup_tokens = [0]
+# lookup_tokens = [1]
 
-# model_draft_tokens = [1, 2, 4, 8, 12, 16]
-model_draft_tokens = [1]
+model_draft_tokens = [1, 2, 4, 8, 12, 16]
+# model_draft_tokens = [1]
 # lookup_tokens = [80]
-# lookup_tokens = [20, 40, 60, 80, 120, 160, 200]
-stats = {mdt: {lt: {"method": [0], "method_diff": [0], "assisted": [0], "pld": [0], "regular": [], "lev_similarity": [0], "generated_tokens_pld": [0], "generated_tokens_method": [0], "diff": [0], "method_output": [0], "regular_output": [], "pld_output": [0], "generated_tokens_regular": []} for lt in lookup_tokens} for mdt in model_draft_tokens}
+lookup_tokens = [20, 40, 60, 80, 120, 160, 200]
+stats = {mdt: {lt: {"method": [], "method_diff": [], "assisted": [], "pld": [], "regular": [], "lev_similarity": [], "generated_tokens_pld": [], "generated_tokens_method": [], "diff": [], "method_output": [], "regular_output": [], "pld_output": [], "generated_tokens_regular": []} for lt in lookup_tokens} for mdt in model_draft_tokens}
 
 global_min_score = 0
 global_scores_count = 0
@@ -386,32 +292,32 @@ regular_get_candidate_generator = model._get_candidate_generator
 
 for mdt in model_draft_tokens:
     for lt in lookup_tokens:
-        for row in tqdm(ds):
+        for row_idx, row in tqdm(enumerate(ds)):
             input_text = shot + "\n## Code Before:\n{code_text}\n## Instruction: {question}\n## Code After:\n".format(code_text=row['code'], question=row['change_request'])
             inputs = tokenizer(input_text, return_tensors="pt")
-        #     inputs = tokenizer.apply_chat_template([
-        #         {
-        #             "role": "user",
-        #             "content": input_text
-        #         },
-        #     ], tokenize=True, add_generation_prompt=True, return_tensors="pt").to(model.device)
-        #     response_prompt = tokenizer.encode("""Sure, here is the modified code:
-        
-        # ```python
-        # """, return_tensors="pt").to(model.device)[:, 1:]
+            inputs = tokenizer.apply_chat_template([
+                {
+                    "role": "user",
+                    "content": input_text
+                },
+            ], tokenize=True, add_generation_prompt=True, return_tensors="pt").to(model.device)
+            #     response_prompt = tokenizer.encode("""Sure, here is the modified code:
+
+            # ```python
+            # """, return_tensors="pt").to(model.device)[:, 1:]
             # inputs = torch.cat((inputs, response_prompt), dim=-1)
-    
+
             # input_text = f"<commit_before>\n{row['incorrect_solutions']}\n<commit_msg>\nFix error {row['type']}\n<commit_after>\n"
             # input_text = f"## Code Before:\n{row['incorrect_solutions']}\n## Change Requested:\nFix error {row['type']}\n## Code After:\n"
-            inputs = tokenizer(input_text, return_tensors="pt").input_ids.to(model.device)
-        
-            code_tokens = tokenizer(row['code'], return_tensors="pt")
+            # inputs = tokenizer(input_text, return_tensors="pt").input_ids.to(model.device)
+
+            code_tokens = tokenizer(row['code'], return_tensors="pt").to(model.device)
             starting_input_tokens = inputs.shape[-1]
-            
+
             max_new_tokens = code_tokens.input_ids.shape[-1] + 500
-    
+
             model._get_candidate_generator = (regular_get_candidate_generator).__get__(model, type(model))
-    
+
             # Use HuggingFace assisted decoding
             # start_time = time.perf_counter()
             # assisted_output = model.generate(
@@ -424,117 +330,89 @@ for mdt in model_draft_tokens:
             # )
             # end_time = time.perf_counter()
             # stats[lt]["assisted"].append(end_time - start_time)
-        
+
             # # Use HuggingFace prompt lookup decoding
-            # start_time = time.perf_counter()
-            # pld_output = model.generate(
-            #     input_ids=inputs,
-            #     max_new_tokens=max_new_tokens,
-            #     stopping_criteria=[CodeContentStoppingCriteria(tokenizer, inputs.shape[-1])],
-            #     return_dict_in_generate=True,
-            #     output_scores=True,
-            #     prompt_lookup_num_tokens=lt,
-            #     use_cache=True
-            # )
-            # end_time = time.perf_counter()
-            # stats[mdt][lt]["pld"].append(end_time - start_time)
-            # stats[mdt][lt]["generated_tokens_pld"].append(pld_output.sequences[:, starting_input_tokens:].shape[-1])
-            # stats[mdt][lt]["pld_output"].append(tokenizer.batch_decode(pld_output.sequences[:, starting_input_tokens:])[0])
-        
-            # # Use regular HuggingFace text generation
-            start_time = time.perf_counter()
-            regular_outputs = model.generate(
-                input_ids=inputs,
-                max_new_tokens=max_new_tokens,
-                stopping_criteria=[CodeContentStoppingCriteria(tokenizer, inputs.shape[-1])],
-                return_dict_in_generate=True,
-                output_scores=True,
-                temperature=0.1,
-                use_cache=True,
-            )
-            end_time = time.perf_counter()
-            stats[mdt][lt]["regular"].append(end_time - start_time)
-            stats[mdt][lt]["regular_output"].append(tokenizer.batch_decode(regular_outputs.sequences[:, starting_input_tokens:])[0])
-            stats[mdt][lt]["generated_tokens_regular"].append(regular_outputs.sequences[:, starting_input_tokens].shape[-1])
-            
+            if mdt == 1:
+                start_time = time.perf_counter()
+                pld_output = model.generate(
+                    input_ids=inputs,
+                    max_new_tokens=max_new_tokens,
+                    return_dict_in_generate=True,
+                    output_scores=True,
+                    prompt_lookup_num_tokens=lt,
+                    use_cache=True
+                )
+                end_time = time.perf_counter()
+                stats[mdt][lt]["pld"].append(end_time - start_time)
+                stats[mdt][lt]["generated_tokens_pld"].append(pld_output.sequences[:, starting_input_tokens:].shape[-1])
+                stats[mdt][lt]["pld_output"].append(tokenizer.batch_decode(pld_output.sequences[:, starting_input_tokens:])[0])
+
+            # # # Use regular HuggingFace text generation
+            if mdt == 1 and lt == 20:
+                start_time = time.perf_counter()
+                regular_outputs = model.generate(
+                    input_ids=inputs,
+                    max_new_tokens=max_new_tokens,
+                    return_dict_in_generate=True,
+                    output_scores=True,
+                    use_cache=True,
+                )
+                end_time = time.perf_counter()
+                stats[mdt][lt]["regular"].append(end_time - start_time)
+                stats[mdt][lt]["regular_output"].append(tokenizer.batch_decode(regular_outputs.sequences[:, starting_input_tokens:])[0])
+                stats[mdt][lt]["generated_tokens_regular"].append(regular_outputs.sequences[:, starting_input_tokens].shape[-1])
+
             # new_text = tokenizer.batch_decode(pld_output.sequences[:, starting_input_tokens:])[0]
-    
+
             # print(row['before'], new_text)
-        
-            # lev_similarity = Levenshtein.normalized_similarity(row['code'], new_text) 
+
+            # lev_similarity = Levenshtein.normalized_similarity(row['code'], new_text)
             # stats[mdt][lt]["lev_similarity"].append(lev_similarity)
-        
-            # stats[lt]["generated_tokens"].append(pld_output.sequences.shape[-1])
-    
-            # Two Layer Lookup Candidate Generator with Score Check
-            # two_layer_candidate_generator = CodeTwoLayerLookupCandidateGenerator(
-            #     tokenizer,
-            #     inputs.shape[-1],
-            #     draft_model,
-            #     inputs,
-            #     code_tokens.input_ids.tolist()[0],
-            #     use_score_check=True,
-            #     min_score=global_min_score,
-            #     scores_count=global_scores_count,
-            #     ngram_size=5,
-            #     num_pred_tokens=lt
-            # )
-            # model._get_candidate_generator = (_get_default_candidate_generator_generator(two_layer_candidate_generator)).__get__(model, type(model))
-        
-            # global_min_score = two_layer_candidate_generator.min_score
-            # global_scores_count = two_layer_candidate_generator.scores_count
-            # start_time = time.perf_counter()
-            # test_out = model.generate(
-            #     inputs=inputs,
-            #     prompt_lookup_num_tokens=1,
-            #     max_new_tokens=max_new_tokens,
-            #     stopping_criteria=[CodeContentStoppingCriteria(tokenizer, inputs.shape[-1])],
-            #     use_cache=True,
-            #     # streamer=TextStreamer(tokenizer)
-            # )
-            # end_time = time.perf_counter()
-            # stats[lt]["method_with_score_cutoff"].append(end_time - start_time)
-    
+
+            # stats[lt]["generated_tokens"].append(pld_output.sequences.shape[-1])\
+
             # # Two Layer Lookup Candidate Generator without Score Check
-            # two_layer_candidate_generator = CodeTwoLayerLookupCandidateGenerator(
-            #     tokenizer,
-            #     inputs.shape[-1],
-            #     draft_model,
-            #     inputs,
-            #     code_tokens.input_ids.tolist()[0],
-            #     use_diff=False,
-            #     use_score_check=False,
-            #     min_score=global_min_score,
-            #     scores_count=global_scores_count,
-            #     ngram_size=5,
-            #     num_pred_tokens=lt,
-            #     num_runs=mdt,
-            # )
-            # model._get_candidate_generator = (_get_default_candidate_generator_generator(two_layer_candidate_generator)).__get__(model, type(model))
-        
-            # global_min_score = two_layer_candidate_generator.min_score
-            # global_scores_count = two_layer_candidate_generator.scores_count
-            # start_time = time.perf_counter()
-            # test_out = model.generate(
-            #     inputs=inputs,
-            #     prompt_lookup_num_tokens=1,
-            #     max_new_tokens=max_new_tokens,
-            #     stopping_criteria=[CodeContentStoppingCriteria(tokenizer, inputs.shape[-1])],
-            #     use_cache=True,
-            #     temperature=0.1
-            #     # streamer=TextStreamer(tokenizer)
-            # )
-            # end_time = time.perf_counter()
-            # stats[mdt][lt]["method"].append(end_time - start_time)
-            # two_layer_result = tokenizer.batch_decode(test_out[:, starting_input_tokens:])[0]
-            # stats[mdt][lt]["generated_tokens_method"].append(test_out[:, starting_input_tokens:].shape[-1])
-            # stats[mdt][lt]["method_output"].append(two_layer_result)
-    
+            if lt == 80:
+                two_layer_candidate_generator = CodeTwoLayerLookupCandidateGenerator(
+                    tokenizer,
+                    inputs.shape[-1],
+                    draft_model,
+                    inputs,
+                    code_tokens.input_ids.tolist()[0],
+                    use_diff=False,
+                    use_score_check=False,
+                    min_score=global_min_score,
+                    scores_count=global_scores_count,
+                    ngram_size=5,
+                    num_pred_tokens=lt,
+                    num_runs=mdt,
+                )
+                model._get_candidate_generator = (_get_default_candidate_generator_generator(two_layer_candidate_generator)).__get__(model, type(model))
+
+                global_min_score = two_layer_candidate_generator.min_score
+                global_scores_count = two_layer_candidate_generator.scores_count
+                start_time = time.perf_counter()
+                # with profile(activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA]) as prof:
+                test_out = model.generate(
+                    inputs=inputs,
+                    prompt_lookup_num_tokens=1,
+                    max_new_tokens=max_new_tokens,
+                    use_cache=True,
+                    # streamer=TextStreamer(tokenizer)
+                )
+                # torch.cuda.synchronize()
+                end_time = time.perf_counter()
+                # prof.export_chrome_trace(f"profiler_results/method_draft_runs_{mdt}_row_{row_idx}.json")
+                stats[mdt][lt]["method"].append(end_time - start_time)
+                two_layer_result = tokenizer.batch_decode(test_out[:, starting_input_tokens:])[0]
+                stats[mdt][lt]["generated_tokens_method"].append(test_out[:, starting_input_tokens:].shape[-1])
+                stats[mdt][lt]["method_output"].append(two_layer_result)
+
             # if not(new_text.strip() == two_layer_result.strip()):
-                # print("Results with differences:")
+            # print("Results with differences:")
             # stats[mdt][lt]["diff"].append("\n".join(difflib.unified_diff(new_text.splitlines(), two_layer_result.splitlines(), n=3)))
-                # print("=======================")
-    
+            # print("=======================")
+
             # Method with diff
             # two_layer_candidate_generator = CodeTwoLayerLookupCandidateGenerator(
             #     tokenizer,
@@ -550,7 +428,7 @@ for mdt in model_draft_tokens:
             #     num_pred_tokens=lt
             # )
             # model._get_candidate_generator = (_get_default_candidate_generator_generator(two_layer_candidate_generator)).__get__(model, type(model))
-        
+
             # global_min_score = two_layer_candidate_generator.min_score
             # global_scores_count = two_layer_candidate_generator.scores_count
             # start_time = time.perf_counter()
@@ -564,9 +442,9 @@ for mdt in model_draft_tokens:
             # )
             # end_time = time.perf_counter()
             # stats[lt]["method_diff"].append(end_time - start_time)
-   
+
             print_update(stats[mdt][lt])
-            temp_save_file = open(f"temp_save_stats_regular.json", "w+")
+            temp_save_file = open(f"temp_save_stats_joint_pld_method.json", "w+")
             temp_save_file.write(json.dumps(stats))
             temp_save_file.close()
 
@@ -579,13 +457,9 @@ print(stats)
 model_name_underscore = model_name.replace("/", "_")
 dataset_name_underscore = dataset_name.replace("/", "_")
 
-stats_file = open(f"stats_{model_name_underscore}_{dataset_name_underscore}_regular_output.json", "w+")
+stats_file = open(f"stats_{model_name_underscore}_{dataset_name_underscore}_joint_pld_method.json", "w+")
 stats_file.write(json.dumps(stats))
 stats_file.close()
 
 
 # In[ ]:
-
-
-
-
