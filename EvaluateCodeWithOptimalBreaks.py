@@ -12,7 +12,7 @@ from typing import Tuple, Optional
 import time
 from typing import List
 from difflib import SequenceMatcher
-load_file = "stats_deepseek-ai_deepseek-coder-33b-instruct_vdaita_edit_time_5k_regular.json"
+load_file = "temp_save_stats_joint_pld_method.json"
 
 draft_model_name = "deepseek-ai/deepseek-coder-33b-instruct"
 model_name = "deepseek-ai/deepseek-coder-1.3b-instruct"
@@ -234,7 +234,7 @@ def sub(x, y):
 from tqdm import tqdm
 import json
 
-regular_outputs = json.loads(open("stats_deepseek-ai_deepseek-coder-33b-instruct_vdaita_edit_time_5k_regular.json", "r").read())["1"]["0"]["regular_output"]
+regular_outputs = json.loads(open("temp_save_stats_joint_pld_method.json", "r").read())["1"]["20"]["regular_output"]
 
 results = []
 save_file = open("optimal_breaks_deepseek-ai_deepseek-coder-33b-instruct_vdaita_edit_time_5k.json", "w+")
@@ -251,7 +251,7 @@ for (row, original_output) in tqdm(zip(ds, regular_outputs)):
 
     code_tokens = tokenizer(row['code'], return_tensors="pt")
     starting_input_tokens = inputs.shape[-1]
-    
+
     max_new_tokens = code_tokens.input_ids.shape[-1] + 500
 
     tokenized_original_output = tokenizer.encode(original_output)
@@ -290,17 +290,18 @@ for (row, original_output) in tqdm(zip(ds, regular_outputs)):
         max_new_tokens=max_new_tokens,
         stopping_criteria=[CodeContentStoppingCriteria(tokenizer, inputs.shape[-1])],
         use_cache=True,
-        # streamer=TextStreamer(tokenizer)
     )
     end_time = time.perf_counter()  # time.time()
 
-    results.append({
-        "input": input_text,
-        "output": tokenizer.decode(test_out.sequences[0]),
-        "time": end_time - start_time,
-        "original_output": original_output
-    })
-    
+    results.append(
+        {
+            # "input": input_text,
+            "output": tokenizer.batch_decode(test_out[:, starting_input_tokens:])[0],
+            "time": end_time - start_time,
+            # "original_output": original_output,
+        }
+    )
+
     save_file.write(json.dumps(results))
 
 save_file.write(json.dumps(results))
