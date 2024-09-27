@@ -408,6 +408,7 @@ for mdt in model_draft_tokens:
             # input_text = f"<commit_before>\n{row['incorrect_solutions']}\n<commit_msg>\nFix error {row['type']}\n<commit_after>\n"
             # input_text = f"## Code Before:\n{row['incorrect_solutions']}\n## Change Requested:\nFix error {row['type']}\n## Code After:\n"
             inputs = tokenizer(input_text, return_tensors="pt").input_ids.to(model.device)
+            # TODO Duplicate inputs
         
             code_tokens = tokenizer(row['code'], return_tensors="pt")
             starting_input_tokens = inputs.shape[-1]
@@ -456,6 +457,7 @@ for mdt in model_draft_tokens:
                 temperature=0.1,
                 use_cache=True,
             )
+            # TODO Why set the temperature as 0.1 here?
             end_time = time.perf_counter()
             stats[mdt][lt]["regular"].append(end_time - start_time)
             stats[mdt][lt]["regular_output"].append(tokenizer.batch_decode(regular_outputs.sequences[:, starting_input_tokens:])[0])
