@@ -2,3 +2,6 @@
 __pycache__/
 *.jsonl*
 .ipynb_checkpoints/
+
+# Add .DS_Store
+# Add .idea/

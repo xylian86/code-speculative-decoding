@@ -8,8 +8,10 @@ import torch
 import torch.nn.functional as F
 from transformers import AutoTokenizer, AutoModelForCausalLM
 import transformers # requires transformers==4.35.2
+
 draft_device = torch.device('cuda:2')
 model_device = torch.device('cuda:3')
+# TODO Can we not hard-coded those device assignment? Instead, these can be the input
 
 
 # In[5]:
@@ -38,6 +40,7 @@ model_name = "deepseek-ai/deepseek-coder-33b-instruct"
 # model_name = "deepseek-ai/deepseek-coder-33b-base"
 tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
 model = AutoModelForCausalLM.from_pretrained(model_name, trust_remote_code=True, torch_dtype=torch.float16,  use_flash_attention_2=True, device_map="auto")#.to(model_device)#, load_in_4bit=True)#  , use_flash_attention=True)
+# TODO Do we use PP to partition the model?
 
 
 # In[ ]:
@@ -54,6 +57,7 @@ from datasets import load_dataset
 # dataset_name = "nuprl/CanItEdit"
 # dataset_split = "test"
 dataset_name = "vdaita/edit_time_5k"
+# TODO please not hard code those variables
 dataset_split = "train"
 ds = load_dataset(dataset_name, split=dataset_split)
 # ds = load_dataset("m-a-p/CodeEditorBench", split="test").shuffle(seed=42).select(list(range(200)))
