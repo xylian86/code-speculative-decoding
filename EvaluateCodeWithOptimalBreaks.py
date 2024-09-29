@@ -53,18 +53,6 @@ def find_candidate_pred_tokens(input_ids, max_ngram_size=3, num_pred_tokens=10):
     # If no match is found, return an empty tensor
     return torch.tensor([100], dtype=torch.long, device=input_ids.device)
 
-class CodeContentStoppingCriteria(StoppingCriteria):
-    def __init__(self, tokenizer, prompt_tokens: int, newline_count=5):
-        self.newline_token = tokenizer.encode("""
-""")[-1]
-        self.code_block_token = tokenizer.encode("```")[-1]        
-        self.newline_count = newline_count
-        self.prompt_tokens = prompt_tokens
-    
-    def __call__(self, input_ids: torch.LongTensor, scores: torch.FloatTensor, **kwargs) -> torch.BoolTensor:
-        considered_tokens = input_ids[:, self.prompt_tokens:][0]
-        return (self.code_block_token == considered_tokens).any().item()
-
 class NumRunsStoppingCriteria(StoppingCriteria):
     def __init__(self, max_num_runs=4):
         self.max_num_runs = max_num_runs
@@ -237,7 +225,7 @@ import json
 regular_outputs = json.loads(open("temp_save_stats_joint_pld_method.json", "r").read())["1"]["20"]["regular_output"]
 
 results = []
-save_file = open("optimal_breaks_deepseek-ai_deepseek-coder-33b-instruct_vdaita_edit_time_5k.json", "w+")
+
 
 for (row, original_output) in tqdm(zip(ds, regular_outputs)):
     input_text = shot + "\n## Code Before:\n{code_text}\n## Instruction: {question}\n## Code After:\n".format(code_text=row['code'], question=row['change_request'])
@@ -288,7 +276,6 @@ for (row, original_output) in tqdm(zip(ds, regular_outputs)):
         inputs=inputs,
         prompt_lookup_num_tokens=1,
         max_new_tokens=max_new_tokens,
-        stopping_criteria=[CodeContentStoppingCriteria(tokenizer, inputs.shape[-1])],
         use_cache=True,
     )
     end_time = time.perf_counter()  # time.time()
@@ -302,6 +289,8 @@ for (row, original_output) in tqdm(zip(ds, regular_outputs)):
         }
     )
 
+    save_file = open("optimal_breaks_deepseek-ai_deepseek-coder-33b-instruct_vdaita_edit_time_5k.json", "w+")
     save_file.write(json.dumps(results))
+    save_file.close()
 
 # save_file.write(json.dumps(results))
